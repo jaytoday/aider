@@ -1,11 +1,9 @@
-import json
-import shlex
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import git
-import tiktoken
 from prompt_toolkit.completion import Completion
 
 from aider import prompts, voice
@@ -24,7 +22,7 @@ class Commands:
             voice_language = None
 
         self.voice_language = voice_language
-        self.tokenizer = tiktoken.encoding_for_model(coder.main_model.name)
+        self.tokenizer = coder.main_model.tokenizer
 
     def is_command(self, inp):
         if inp[0] == "/":
@@ -105,20 +103,27 @@ class Commands:
 
         res = []
 
+        self.coder.choose_fence()
+
         # system messages
+        main_sys = self.coder.fmt_system_prompt(self.coder.gpt_prompts.main_system)
+        main_sys += "\n" + self.coder.fmt_system_prompt(self.coder.gpt_prompts.system_reminder)
         msgs = [
-            dict(role="system", content=self.coder.gpt_prompts.main_system),
-            dict(role="system", content=self.coder.gpt_prompts.system_reminder),
+            dict(role="system", content=main_sys),
+            dict(
+                role="system",
+                content=self.coder.fmt_system_prompt(self.coder.gpt_prompts.system_reminder),
+            ),
         ]
-        tokens = len(self.tokenizer.encode(json.dumps(msgs)))
+
+        tokens = self.coder.main_model.token_count(msgs)
         res.append((tokens, "system messages", ""))
 
         # chat history
         msgs = self.coder.done_messages + self.coder.cur_messages
         if msgs:
             msgs = [dict(role="dummy", content=msg) for msg in msgs]
-            msgs = json.dumps(msgs)
-            tokens = len(self.tokenizer.encode(msgs))
+            tokens = self.coder.main_model.token_count(msgs)
             res.append((tokens, "chat history", "use /clear to clear"))
 
         # repo map
@@ -126,7 +131,7 @@ class Commands:
         if self.coder.repo_map:
             repo_content = self.coder.repo_map.get_repo_map(self.coder.abs_fnames, other_files)
             if repo_content:
-                tokens = len(self.tokenizer.encode(repo_content))
+                tokens = self.coder.main_model.token_count(repo_content)
                 res.append((tokens, "repository map", "use --map-tokens to resize"))
 
         # files
@@ -135,7 +140,7 @@ class Commands:
             content = self.io.read_text(fname)
             # approximate
             content = f"{relative_fname}\n```\n" + content + "```\n"
-            tokens = len(self.tokenizer.encode(content))
+            tokens = self.coder.main_model.token_count(content)
             res.append((tokens, f"{relative_fname}", "use /drop to drop from chat"))
 
         self.io.tool_output("Approximate context window usage, in tokens:")
@@ -210,6 +215,10 @@ class Commands:
             or last_commit.hexsha[:7] != self.coder.last_aider_commit_hash
         ):
             self.io.tool_error("The last commit was not made by aider in this chat session.")
+            self.io.tool_error(
+                "You could try `/git reset --hard HEAD^` but be aware that this is a destructive"
+                " command!"
+            )
             return
         self.coder.repo.repo.git.reset("--hard", "HEAD~1")
         self.io.tool_output(
@@ -229,6 +238,7 @@ class Commands:
 
         if not self.coder.last_aider_commit_hash:
             self.io.tool_error("No previous aider commit found.")
+            self.io.tool_error("You could try `/git diff` or `/git diff HEAD^`.")
             return
 
         commits = f"{self.coder.last_aider_commit_hash}~1"
@@ -249,7 +259,11 @@ class Commands:
                 yield Completion(fname, start_position=-len(partial))
 
     def glob_filtered_to_repo(self, pattern):
-        raw_matched_files = list(Path(self.coder.root).glob(pattern))
+        try:
+            raw_matched_files = list(Path(self.coder.root).glob(pattern))
+        except ValueError as err:
+            self.io.tool_error(f"Error matching {pattern}: {err}")
+            raw_matched_files = []
 
         matched_files = []
         for fn in raw_matched_files:
@@ -266,39 +280,41 @@ class Commands:
         return res
 
     def cmd_add(self, args):
-        "Add matching files to the chat session using glob patterns"
+        "Add files to the chat so GPT can edit them or review them in detail"
 
         added_fnames = []
-        git_added = []
-        git_files = self.coder.repo.get_tracked_files() if self.coder.repo else []
 
         all_matched_files = set()
-        for word in args.split():
+
+        filenames = parse_quoted_filenames(args)
+        for word in filenames:
+            if Path(word).is_absolute():
+                fname = Path(word)
+            else:
+                fname = Path(self.coder.root) / word
+
+            if fname.exists() and fname.is_file():
+                all_matched_files.add(str(fname))
+                continue
+                # an existing dir will fall through and get recursed by glob
+
             matched_files = self.glob_filtered_to_repo(word)
+            if matched_files:
+                all_matched_files.update(matched_files)
+                continue
 
-            if not matched_files:
-                if any(char in word for char in "*?[]"):
-                    self.io.tool_error(f"No files to add matching pattern: {word}")
-                else:
-                    if Path(word).exists():
-                        if Path(word).is_file():
-                            matched_files = [word]
-                        else:
-                            self.io.tool_error(f"Unable to add: {word}")
-                    elif self.io.confirm_ask(
-                        f"No files matched '{word}'. Do you want to create the file?"
-                    ):
-                        (Path(self.coder.root) / word).touch()
-                        matched_files = [word]
-
-            all_matched_files.update(matched_files)
+            if self.io.confirm_ask(f"No files matched '{word}'. Do you want to create {fname}?"):
+                fname.touch()
+                all_matched_files.add(str(fname))
 
         for matched_file in all_matched_files:
             abs_file_path = self.coder.abs_root_path(matched_file)
 
-            if self.coder.repo and matched_file not in git_files:
-                self.coder.repo.repo.git.add(abs_file_path)
-                git_added.append(matched_file)
+            if not abs_file_path.startswith(self.coder.root):
+                self.io.tool_error(
+                    f"Can not add {abs_file_path}, which is not within {self.coder.root}"
+                )
+                continue
 
             if abs_file_path in self.coder.abs_fnames:
                 self.io.tool_error(f"{matched_file} is already in the chat")
@@ -310,11 +326,6 @@ class Commands:
                     self.coder.abs_fnames.add(abs_file_path)
                     self.io.tool_output(f"Added {matched_file} to the chat")
                     added_fnames.append(matched_file)
-
-        if self.coder.repo and git_added:
-            git_added = " ".join(git_added)
-            commit_message = f"aider: Added {git_added}"
-            self.coder.repo.commit(message=commit_message)
 
         if not added_fnames:
             return
@@ -334,17 +345,18 @@ class Commands:
                 yield Completion(fname, start_position=-len(partial))
 
     def cmd_drop(self, args):
-        "Remove matching files from the chat session"
+        "Remove files from the chat session to free up context space"
 
         if not args.strip():
             self.io.tool_output("Dropping all files from the chat session.")
             self.coder.abs_fnames = set()
 
-        for word in args.split():
+        filenames = parse_quoted_filenames(args)
+        for word in filenames:
             matched_files = self.glob_filtered_to_repo(word)
 
             if not matched_files:
-                self.io.tool_error(f"No files matched '{word}'")
+                matched_files.append(word)
 
             for matched_file in matched_files:
                 abs_fname = self.coder.abs_root_path(matched_file)
@@ -356,10 +368,15 @@ class Commands:
         "Run a git command"
         combined_output = None
         try:
-            parsed_args = shlex.split("git " + args)
+            args = "git " + args
             env = dict(GIT_EDITOR="true", **subprocess.os.environ)
             result = subprocess.run(
-                parsed_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                shell=True,
             )
             combined_output = result.stdout
         except Exception as e:
@@ -374,9 +391,8 @@ class Commands:
         "Run a shell command and optionally add the output to the chat"
         combined_output = None
         try:
-            parsed_args = shlex.split(args)
             result = subprocess.run(
-                parsed_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=True, encoding=self.io.encoding, errors='replace'
             )
             combined_output = result.stdout
         except Exception as e:
@@ -402,7 +418,7 @@ class Commands:
         sys.exit()
 
     def cmd_ls(self, args):
-        "List all known files and those included in the chat session"
+        "List all known files and indicate which are included in the chat session"
 
         files = self.coder.get_all_relative_files()
 
@@ -446,9 +462,11 @@ class Commands:
 
         if not self.voice:
             try:
-                self.voice = voice.Voice()
+                self.voice = voice.Voice(self.coder.client)
             except voice.SoundDeviceError:
-                self.io.tool_error("Unable to import `sounddevice`, is portaudio installed?")
+                self.io.tool_error(
+                    "Unable to import `sounddevice` and/or `soundfile`, is portaudio installed?"
+                )
                 return
 
         history_iter = self.io.get_input_history()
@@ -488,3 +506,9 @@ def expand_subdir(file_path):
         for file in file_path.rglob("*"):
             if file.is_file():
                 yield str(file)
+
+
+def parse_quoted_filenames(args):
+    filenames = re.findall(r"\"(.+?)\"|(\S+)", args)
+    filenames = [name for sublist in filenames for name in sublist if name]
+    return filenames

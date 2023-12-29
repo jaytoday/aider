@@ -2,6 +2,7 @@ import os
 from pathlib import Path, PurePosixPath
 
 import git
+import pathspec
 
 from aider import models, prompts, utils
 from aider.sendchat import simple_send_with_retries
@@ -11,8 +12,12 @@ from .dump import dump  # noqa: F401
 
 class GitRepo:
     repo = None
+    aider_ignore_file = None
+    aider_ignore_spec = None
+    aider_ignore_ts = 0
 
-    def __init__(self, io, fnames, git_dname):
+    def __init__(self, io, fnames, git_dname, aider_ignore_file=None, client=None):
+        self.client = client
         self.io = io
 
         if git_dname:
@@ -49,14 +54,20 @@ class GitRepo:
         self.repo = git.Repo(repo_paths.pop(), odbt=git.GitDB)
         self.root = utils.safe_abs_path(self.repo.working_tree_dir)
 
+        if aider_ignore_file:
+            self.aider_ignore_file = Path(aider_ignore_file)
+
     def commit(self, fnames=None, context=None, prefix=None, message=None):
         if not fnames and not self.repo.is_dirty():
+            return
+
+        diffs = self.get_diffs(fnames)
+        if not diffs:
             return
 
         if message:
             commit_message = message
         else:
-            diffs = self.get_diffs(fnames)
             commit_message = self.get_commit_message(diffs, context)
 
         if not commit_message:
@@ -92,9 +103,7 @@ class GitRepo:
 
     def get_commit_message(self, diffs, context):
         if len(diffs) >= 4 * 1024 * 4:
-            self.io.tool_error(
-                f"Diff is too large for {models.GPT35.name} to generate a commit message."
-            )
+            self.io.tool_error("Diff is too large to generate a commit message.")
             return
 
         diffs = "# Diffs:\n" + diffs
@@ -109,8 +118,8 @@ class GitRepo:
             dict(role="user", content=content),
         ]
 
-        for model in [models.GPT35.name, models.GPT35_16k.name]:
-            commit_message = simple_send_with_retries(model, messages)
+        for model in models.Model.commit_message_models():
+            commit_message = simple_send_with_retries(self.client, model.name, messages)
             if commit_message:
                 break
 
@@ -186,18 +195,36 @@ class GitRepo:
 
         # convert to appropriate os.sep, since git always normalizes to /
         res = set(
-            str(Path(PurePosixPath((Path(self.root) / path).relative_to(self.root))))
+            self.normalize_path(path)
             for path in files
         )
 
-        return res
+        return self.filter_ignored_files(res)
+
+    def normalize_path(self, path):
+        return str(Path(PurePosixPath((Path(self.root) / path).relative_to(self.root))))
+
+    def filter_ignored_files(self, fnames):
+        if not self.aider_ignore_file or not self.aider_ignore_file.is_file():
+            return fnames
+
+        mtime = self.aider_ignore_file.stat().st_mtime
+        if mtime != self.aider_ignore_ts:
+            self.aider_ignore_ts = mtime
+            lines = self.aider_ignore_file.read_text().splitlines()
+            self.aider_ignore_spec = pathspec.PathSpec.from_lines(
+                pathspec.patterns.GitWildMatchPattern,
+                lines,
+            )
+
+        return [fname for fname in fnames if not self.aider_ignore_spec.match_file(fname)]
 
     def path_in_repo(self, path):
         if not self.repo:
             return
 
         tracked_files = set(self.get_tracked_files())
-        return path in tracked_files
+        return self.normalize_path(path) in tracked_files
 
     def abs_root_path(self, path):
         res = Path(self.root) / path

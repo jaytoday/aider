@@ -4,9 +4,13 @@
 - [How does aider use git?](#how-does-aider-use-git)
 - [GPT-4 vs GPT-3.5](#gpt-4-vs-gpt-35)
 - [Aider isn't editing my files?](#aider-isnt-editing-my-files)
+- [Accessing other LLMs with OpenRouter](#accessing-other-llms-with-openrouter)
 - [Can I use aider with other LLMs, local LLMs, etc?](#can-i-use-aider-with-other-llms-local-llms-etc)
 - [Can I change the system prompts that aider uses?](#can-i-change-the-system-prompts-that-aider-uses)
 - [Can I run aider in Google Colab?](#can-i-run-aider-in-google-colab)
+- [How can I run aider locally from source code?](#how-can-i-run-aider-locally-from-source-code)
+- [Can I script aider?](#can-i-script-aider)
+- [What code languages does aider support?](#what-code-languages-does-aider-support)
 
 ## How does aider use git?
 
@@ -18,11 +22,11 @@ Aider is tightly integrated with git, which makes it easy to:
   - Manage a series of GPT's changes on a git branch
 
 Aider specifically uses git in these ways:
- 
+
   - It asks to create a git repo if you launch it in a directory without one.
   - Whenever GPT edits a file, aider commits those changes with a descriptive commit message. This makes it easy to undo or review GPT's changes.
   - Aider takes special care if GPT tries to edit files that already have uncommitted changes (dirty files). Aider will first commit any preexisting changes with a descriptive commit message. This keeps your edits separate from GPT's edits, and makes sure you never lose your work if GPT makes an inappropriate change.
-  
+
 Aider also allows you to use in-chat commands to `/diff` or `/undo` the last change made by GPT.
 To do more complex management of your git history, you cat use raw `git` commands,
 either by using `/git` within the chat, or with standard git tools outside of aider.
@@ -56,7 +60,7 @@ They have large context windows, better coding skills and
 they generally obey the instructions in the system prompt.
 GPT-4 is able to structure code edits as simple "diffs"
 and use a
-[repository map](https://aider.chat/docs/ctags.html)
+[repository map](https://aider.chat/docs/repomap.html)
 to improve its ability to make changes in larger codebases.
 
 GPT-3.5 is supported more experimentally
@@ -70,11 +74,13 @@ when using GPT-3.5.
 For a detailed and quantitative comparison, please see the
 [code editing benchmark results for GPT-3.5 and GPT-4](https://aider.chat/docs/benchmarks.html).
 
-In practice, this means you can use aider to edit a set of source files
+In practice, this means you can use aider to **edit** a set of source files
 that total up to the sizes below.
-Just add the specific set of files to the chat
-that are relevant to the change you are requesting.
-This minimizes your use of the context window, as well as costs.
+The repo can be arbitrarily large, but
+the specific set of files which need to be edited for your request
+must fit within the context window.
+Only `/add` the files that need to be edited to the chat
+to minimize your use of the context window and costs.
 
 | Model             | Context<br>Size | Edit<br>Format | Max<br>File Size | Max<br>File Size | Repo<br>Map? |
 | ----------------- | -- | --     | -----| -- | -- |
@@ -112,18 +118,31 @@ In these cases, here are some things you might try:
   - Use `/drop` to remove files from the chat session which aren't needed for the task at hand. This will reduce distractions and may help GPT produce properly formatted edits.
   - Use `/clear` to remove the conversation history, again to help GPT focus.
 
+## Accessing other LLMs with OpenRouter
+
+[OpenRouter](https://openrouter.ai) provide an interface to [many models](https://openrouter.ai/docs) which are not widely accessible, in particular gpt-4-32k and claude-2.
+
+To access the openrouter models simply
+
+- register for an account, purchase some credits and generate an api key
+- set --openai-api-base to https://openrouter.ai/api/v1
+- set --openai-api-key to your openrouter key
+- set --model to the model of your choice (openai/gpt-4-32k, anthropic/claude-2 etc.)
+
+Some of the models weren't very functional and each llm has its own quirks. The anthropic models work ok, but the llama-2 ones in particular will need more work to play friendly with aider.
+
 ## Can I use aider with other LLMs, local LLMs, etc?
 
-Aider only has experimental support for LLMs other than OpenAI's GPT-3.5 and GPT-4. This is for two reasons:
+Aider provides experimental support for LLMs other than OpenAI's GPT-3.5 and GPT-4. The support is currently only experimental for two reasons:
 
-- GPT-3.5 is just barely capable of *editing code* to provide aider's interactive "pair programming" style workflow. None of the other models seem to be as capable as GPT-3.5.
+- GPT-3.5 is just barely capable of *editing code* to provide aider's interactive "pair programming" style workflow. None of the other models seem to be as capable as GPT-3.5 yet.
 - Just "hooking up" aider to a new model by connecting to its API is almost certainly not enough to get it working in a useful way. Getting aider working well with GPT-3.5 and GPT-4 was a significant undertaking, involving [specific code editing prompts and backends for each model and extensive benchmarking](https://aider.chat/docs/benchmarks.html). Officially supporting each new LLM will probably require a similar effort to tailor the prompts and editing backends.
 
-That said, aider does provide features to experiment with other models. Numerous users have already done experiments with numerous models. None of these experiments have yet identified other models that look like they are capable of working with aider.
+Numerous users have done experiments with numerous models. None of these experiments have yet identified other models that look like they are capable of working well with aider.
 
 Once we see signs that a *particular* model is capable of code editing, it would be reasonable for aider to attempt to officially support such a model. Until then, aider will simply maintain experimental support for using alternative models.
 
-There are ongoing discussions about [LLM integrations in the aider discord](https://discord.com/channels/1131200896827654144/1133060780649087048).
+There are ongoing discussions about [LLM integrations in the aider discord](https://discord.gg/yaUk7JqJ9G).
 
 Here are some [GitHub issues which may contain relevant information](https://github.com/paul-gauthier/aider/issues?q=is%3Aissue+%23172).
 
@@ -134,8 +153,7 @@ you can use `--openai-api-base` to connect to a different API endpoint.
 
 ### Local LLMs
 
-[LocalAI](https://github.com/go-skynet/LocalAI)
-and
+[LocalAI](https://github.com/go-skynet/LocalAI) and
 [SimpleAI](https://github.com/lhenault/simpleAI)
 look like relevant tools to serve local models via a compatible API.
 
@@ -210,3 +228,106 @@ all the raw information being sent to/from GPT in the conversation.
 User [imabutahersiddik](https://github.com/imabutahersiddik)
 has provided this
 [Colab notebook](https://colab.research.google.com/drive/1J9XynhrCqekPL5PR6olHP6eE--rnnjS9?usp=sharing).
+
+## How can I run aider locally from source code?
+
+To run the project locally, follow these steps:
+
+```
+# Clone the repository:
+git clone git@github.com:paul-gauthier/aider.git
+
+# Navigate to the project directory:
+cd aider
+
+# Install the dependencies listed in the `requirements.txt` file:
+pip install -r requirements.txt
+
+# Run the local version of Aider:
+python -m aider.main
+```
+
+# Can I script aider?
+
+You can script aider via the command line or python.
+
+## Command line
+
+Aider takes a `--message` argument, where you can give it a natural language instruction.
+It will do that one thing, apply the edits to the files and then exit.
+So you could do:
+
+```bash
+aider --message "make a script that prints hello" hello.js
+```
+
+Or you can write simple shell scripts to apply the same instruction to many files:
+
+```bash
+for FILE in *.py ; do
+    aider --message "add descriptive docstrings to all the functions" $FILE
+done
+```
+
+## Python
+
+You can also script aider from python:
+
+```python
+import openai
+from aider.coders import Coder
+
+# Make an openai client
+client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+# This is a list of files to add to the chat
+fnames = ["foo.py"]
+
+# Create a coder object
+coder = Coder.create(client=client, fnames=fnames)
+
+# This will execute one instruction on those files and then return
+coder.run("make a script that prints hello world")
+
+# Send another instruction
+coder.run("make it say goodbye")
+```
+
+## What code languages does aider support?
+
+Aider supports pretty much all the popular coding languages.
+This is partly because GPT-4 is fluent in most mainstream languages,
+and familiar with popular libraries, packages and frameworks.
+
+In fact, coding with aider is sometimes the most magical
+when you're working in a language that you
+are less familiar with.
+GPT often knows the language better than you,
+and can generate all the boilerplate to get to the heart of your
+problem.
+GPT will often solve your problem in an elegant way
+using a library or package that you weren't even aware of.
+
+Aider uses tree-sitter to do code analysis and help
+GPT navigate larger code bases by producing
+a [repository map](https://aider.chat/docs/repomap.html).
+
+Aider can currently produce repository maps for most mainstream languages, listed below.
+But aider should work quite well for other languages, even without repo map support.
+
+- C
+- C#
+- C++
+- Emacs Lisp
+- Elixir
+- Elm
+- Go
+- Java
+- Javascript
+- OCaml
+- PHP
+- Python
+- QL
+- Ruby
+- Rust
+- Typescript
